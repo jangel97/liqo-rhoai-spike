@@ -4,12 +4,11 @@ Proves that two RHOAI tenants (2.x via custom VK, 3.x via Liqo) can
 both submit LMEvalJob workloads against the same shared GPU worker
 cluster without interfering with each other.
 
-Uses HuggingFace model mode (facebook/opt-125m loaded directly in the
-eval pod) to avoid deploying model servers, which would not fit in the
-memory-constrained tenants. The LMEvalJob pods run on the tenants and
-evaluate the model on CPU. The test proves that both TrustyAI operators
-can create and complete LMEvalJobs independently while sharing the
-same GPU worker backend.
+Uses the built-in dummy model (random outputs) to avoid needing
+internet access or a model server. The LMEvalJob pods run on the
+tenants with minimal resources. The test proves that both TrustyAI
+operators can create and complete LMEvalJobs independently while
+sharing the same GPU worker backend.
 
 Prerequisites:
   - sno-tenant (RHOAI 2.x) running
@@ -35,7 +34,7 @@ LMEVAL_GROUP = "trustyai.opendatahub.io"
 LMEVAL_VERSION = "v1alpha1"
 LMEVAL_PLURAL = "lmevaljobs"
 
-LMEVAL_MODEL_NAME = "facebook/opt-125m"
+LMEVAL_MODEL_NAME = "dummy"
 
 NS = VK_TEST_NAMESPACE
 
@@ -67,10 +66,8 @@ def _create_lmeval_job(job_name):
         "kind": "LMEvalJob",
         "metadata": {"name": job_name, "namespace": NS},
         "spec": {
-            "model": "hf",
-            "modelArgs": [
-                {"name": "pretrained", "value": LMEVAL_MODEL_NAME},
-            ],
+            "model": LMEVAL_MODEL_NAME,
+            "modelArgs": [],
             "taskList": {
                 "taskNames": ["arc_easy"],
             },
