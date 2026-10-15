@@ -1,0 +1,30 @@
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: auto-offload-gpu-namespace
+spec:
+  rules:
+    - name: generate-namespace-offloading
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      preconditions:
+        all:
+          - key: "{{ request.object.spec.containers[?resources.limits.\"nvidia.com/gpu\"] | length(@) }}"
+            operator: GreaterThan
+            value: 0
+      generate:
+        synchronize: false
+        apiVersion: offloading.liqo.io/v1beta1
+        kind: NamespaceOffloading
+        name: offloading
+        namespace: "{{ request.object.metadata.namespace }}"
+        data:
+          spec:
+            namespaceMappingStrategy: EnforceSameName
+            podOffloadingStrategy: LocalAndRemote
+            clusterSelector:
+              nodeSelectorTerms: []
