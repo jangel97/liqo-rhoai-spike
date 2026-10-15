@@ -4,7 +4,7 @@ kind: ClusterRole
 metadata:
   name: kyverno-generate-namespace-offloading
   labels:
-    rbac.authorization.k8s.io/aggregate-to-kyverno-background-controller: "true"
+    rbac.kyverno.io/aggregate-to-background-controller: "true"
 rules:
   - apiGroups: ["offloading.liqo.io"]
     resources: ["namespaceoffloadings"]
