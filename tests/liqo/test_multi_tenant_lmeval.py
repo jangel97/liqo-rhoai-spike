@@ -34,7 +34,7 @@ LMEVAL_GROUP = "trustyai.opendatahub.io"
 LMEVAL_VERSION = "v1alpha1"
 LMEVAL_PLURAL = "lmevaljobs"
 
-LMEVAL_MODEL_NAME = "dummy"
+LMEVAL_MODEL_NAME = "hf"
 
 NS = VK_TEST_NAMESPACE
 
@@ -67,18 +67,16 @@ def _create_lmeval_job(job_name):
         "metadata": {"name": job_name, "namespace": NS},
         "spec": {
             "model": LMEVAL_MODEL_NAME,
-            "modelArgs": [],
+            "modelArgs": [
+                {"name": "pretrained", "value": "facebook/opt-125m"},
+            ],
             "taskList": {
                 "taskNames": ["arc_easy"],
             },
             "limit": "2",
             "batchSize": "1",
-            "allowOnline": False,
+            "allowOnline": True,
             "pod": {
-                "resources": {
-                    "requests": {"cpu": "100m", "memory": "256Mi"},
-                    "limits": {"cpu": "2", "memory": "2Gi"},
-                },
                 "volumes": [
                     {"name": "hf-cache", "emptyDir": {}},
                     {"name": "tmp", "emptyDir": {}},
@@ -89,6 +87,10 @@ def _create_lmeval_job(job_name):
                     "env": [
                         {"name": "HF_HOME", "value": "/tmp/hf-cache"},
                     ],
+                    "resources": {
+                        "requests": {"cpu": "100m", "memory": "256Mi"},
+                        "limits": {"cpu": "2", "memory": "2Gi"},
+                    },
                     "volumeMounts": [
                         {"name": "hf-cache", "mountPath": "/tmp/hf-cache"},
                         {"name": "tmp", "mountPath": "/tmp"},
