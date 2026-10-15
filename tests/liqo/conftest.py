@@ -161,11 +161,53 @@ LMEVAL_DISABLED_COMPONENTS = [
 ]
 
 
-def _minimize_dsc_for_lmeval(custom_api):
+def _wait_for_rhods_operator(core_api, timeout=300):
+    """Wait for rhods-operator to be ready (webhook must be reachable)."""
+    apps = client.AppsV1Api(core_api.api_client)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            dep = apps.read_namespaced_deployment(
+                "rhods-operator", "redhat-ods-operator",
+            )
+            if (dep.status.ready_replicas or 0) >= 1:
+                return True
+        except Exception:
+            pass
+        time.sleep(10)
+    return False
+
+
+def _patch_dsc_with_retry(custom_api, comp, state, retries=6, delay=10):
+    for attempt in range(retries):
+        try:
+            custom_api.patch_cluster_custom_object(
+                group=DSC_GROUP, version=DSC_VERSION,
+                plural=DSC_PLURAL, name=DSC_NAME,
+                body={"spec": {"components": {comp: {"managementState": state}}}},
+            )
+            return True
+        except Exception as exc:
+            if attempt < retries - 1:
+                log.info("DSC patch %s → %s failed (attempt %d), retrying: %s",
+                         comp, state, attempt + 1, exc)
+                time.sleep(delay)
+            else:
+                log.warning("Failed to set DSC %s → %s after %d attempts: %s",
+                            comp, state, retries, exc)
+    return False
+
+
+def _minimize_dsc_for_lmeval(core_api, custom_api):
     """Disable all DSC components except kserve and trustyai.
 
+    Waits for the rhods-operator webhook to be ready before patching.
     Returns a dict of {component: original_state} for teardown.
     """
+    log.info("Waiting for rhods-operator to be ready before DSC changes...")
+    if not _wait_for_rhods_operator(core_api):
+        log.warning("rhods-operator not ready after 300s, proceeding anyway")
+
     dsc = custom_api.get_cluster_custom_object(
         group=DSC_GROUP, version=DSC_VERSION, plural=DSC_PLURAL, name=DSC_NAME,
     )
@@ -176,29 +218,15 @@ def _minimize_dsc_for_lmeval(custom_api):
         state = components.get(comp, {}).get("managementState", "Removed")
         originals[comp] = state
         if state == "Managed":
-            try:
-                custom_api.patch_cluster_custom_object(
-                    group=DSC_GROUP, version=DSC_VERSION,
-                    plural=DSC_PLURAL, name=DSC_NAME,
-                    body={"spec": {"components": {comp: {"managementState": "Removed"}}}},
-                )
+            if _patch_dsc_with_retry(custom_api, comp, "Removed"):
                 log.info("DSC %s → Removed (was %s)", comp, state)
-            except Exception as exc:
-                log.warning("Failed to disable DSC %s: %s", comp, exc)
 
     for comp in LMEVAL_REQUIRED_COMPONENTS:
         state = components.get(comp, {}).get("managementState", "Removed")
         originals[comp] = state
         if state != "Managed":
-            try:
-                custom_api.patch_cluster_custom_object(
-                    group=DSC_GROUP, version=DSC_VERSION,
-                    plural=DSC_PLURAL, name=DSC_NAME,
-                    body={"spec": {"components": {comp: {"managementState": "Managed"}}}},
-                )
+            if _patch_dsc_with_retry(custom_api, comp, "Managed"):
                 log.info("DSC %s → Managed (was %s)", comp, state)
-            except Exception as exc:
-                log.warning("Failed to enable DSC %s: %s", comp, exc)
 
     return originals
 
@@ -227,8 +255,8 @@ def _restore_dsc(custom_api, originals):
 @pytest.fixture(scope="session")
 def rhoai2_lmeval_minimal(request, rhoai2_tenant_clients):
     """Strip RHOAI 2.x DSC to kserve + trustyai only."""
-    _, custom = rhoai2_tenant_clients
-    originals = _minimize_dsc_for_lmeval(custom)
+    core, custom = rhoai2_tenant_clients
+    originals = _minimize_dsc_for_lmeval(core, custom)
     request.addfinalizer(lambda: _restore_dsc(custom, originals))
     time.sleep(30)
 
@@ -236,8 +264,8 @@ def rhoai2_lmeval_minimal(request, rhoai2_tenant_clients):
 @pytest.fixture(scope="session")
 def rhoai3_lmeval_minimal(request, liqo_tenant_clients):
     """Strip RHOAI 3.x DSC to kserve + trustyai only."""
-    _, custom = liqo_tenant_clients
-    originals = _minimize_dsc_for_lmeval(custom)
+    core, custom = liqo_tenant_clients
+    originals = _minimize_dsc_for_lmeval(core, custom)
     request.addfinalizer(lambda: _restore_dsc(custom, originals))
     time.sleep(30)
 
