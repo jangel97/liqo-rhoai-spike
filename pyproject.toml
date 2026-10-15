@@ -1,0 +1,21 @@
+[project]
+name = "liqo-rhoai-spike"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "pytest>=8.0",
+    "kubernetes>=29.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["tests"]
+filterwarnings = [
+    "ignore::urllib3.exceptions.InsecureRequestWarning",
+]
+markers = [
+    "liqo: Liqo cross-cluster GPU dispatch tests",
+    "rhoai: RHOAI workload dispatch via Liqo",
+    "networking: Cross-cluster networking via Submariner",
+    "kueue: Kueue admission control and scheduling via Liqo",
+]

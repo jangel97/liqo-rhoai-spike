@@ -1,0 +1,28 @@
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: inject-gpu-node-toleration
+spec:
+  rules:
+    - name: add-gpu-toleration
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      preconditions:
+        all:
+          - key: "{{ request.object.spec.containers[?resources.limits.\"nvidia.com/gpu\"] | length(@) }}"
+            operator: GreaterThan
+            value: 0
+      mutate:
+        patchStrategicMerge:
+          spec:
+            tolerations:
+              - key: nvidia.com/gpu
+                operator: Exists
+                effect: NoSchedule
+              - key: virtual-node.liqo.io/not-allowed
+                operator: Exists
+                effect: NoExecute
