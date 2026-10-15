@@ -431,10 +431,97 @@ python -m pytest tests/liqo/ -v -m kueue           # Kueue admission/queuing/pre
 | **LMEval** | — | L29 PASS | LMEval stays local, evaluates locally served model |
 | **KServe net** | — | L30 PASS | KServe inference reachable via Submariner |
 | **Notebook net** | — | L31 PASS | Notebook reachable via Submariner |
+| **Istio sidecar** | S24 PASS | N/A | RHOAI 3.x dropped OSSM; see deployment finding below |
 
 ---
 
 ## Architecture
+
+### The idea
+
+A tenant cluster runs RHOAI 3.x with all the operators but has no GPUs.
+A separate worker cluster has the physical GPUs but no RHOAI. Users
+interact with RHOAI on the tenant exactly as they normally would. When
+they request a GPU, the workload runs on the worker's hardware. When
+they don't, the workload stays on the tenant. The user does not know
+which cluster runs the pod.
+
+```mermaid
+graph TB
+    subgraph tenant["Tenant cluster — RHOAI 3.x, no GPUs"]
+        user([User creates GPU workload])
+        rhoai[RHOAI operator<br/>training-operator / notebook-controller<br/>kserve / kuberay / trustyai / dspa]
+        kyverno_t[Kyverno<br/>injects GPU taint toleration]
+        sched[kube-scheduler]
+        vnode[Liqo virtual node<br/>nvidia.com/gpu in allocatable]
+        liqo_c[Liqo consumer<br/>creates ShadowPod on worker]
+        local_pod[Non-GPU pod<br/>stays on tenant]
+    end
+
+    subgraph worker["Worker cluster — GPUs, no RHOAI"]
+        shadow[ShadowPod controller<br/>creates real pod]
+        kyverno_w[Kyverno<br/>injects Kueue labels]
+        kueue[Kueue<br/>GPU admission and quota]
+        gpu_pod[Pod runs on physical GPU]
+        reflector[Resource reflector<br/>Secrets, ConfigMaps, Services, PVCs]
+    end
+
+    subgraph net["Cross-cluster networking"]
+        submariner[Submariner v0.24<br/>Libreswan IPsec tunnel]
+    end
+
+    user --> rhoai
+    rhoai -->|pod spec with<br/>nvidia.com/gpu: 1| kyverno_t
+    kyverno_t -->|toleration injected| sched
+    sched -->|GPU pod| vnode
+    sched -->|non-GPU pod| local_pod
+    vnode --> liqo_c
+    liqo_c -->|ShadowPod| shadow
+    shadow --> kyverno_w
+    kyverno_w --> kueue
+    kueue -->|admitted| gpu_pod
+    gpu_pod -.->|status, PodIP, logs| liqo_c
+    reflector -.->|synced resources| vnode
+    submariner ---|pod-to-pod traffic| tenant
+    submariner ---|pod-to-pod traffic| worker
+```
+
+How the pieces fit together:
+
+- The tenant cluster owns all RHOAI operators and CRDs. Users create
+  Notebooks, PyTorchJobs, InferenceServices, and pipelines here. The
+  worker has no RHOAI at all.
+- Liqo peers the two clusters and registers a virtual node on the
+  tenant. This node advertises `nvidia.com/gpu` in its allocatable
+  resources. No other node on the tenant has GPUs, so the kube-scheduler
+  places GPU pods on the virtual node automatically.
+- Kyverno on the tenant injects a GPU taint toleration into pods that
+  request `nvidia.com/gpu`. This is what makes only GPU pods land on
+  the virtual node. Non-GPU pods (DSPA, LMEval, monitoring) stay local.
+- When a pod lands on the virtual node, Liqo's consumer controller
+  creates a ShadowPod CRD on the worker. The ShadowPod controller on
+  the worker turns it into a real pod.
+- Kyverno on the worker injects Kueue scheduling labels into incoming
+  pods. Kueue checks the ClusterQueue: if a GPU is available, the pod
+  runs. If not, it queues until one frees up. Priority preemption works
+  through Kueue's standard mechanisms.
+- Liqo's resource reflector syncs Secrets, ConfigMaps, Services, and
+  PVCs from the tenant namespace to a twin namespace on the worker, so
+  the offloaded pod has everything it needs.
+- Status, logs, and the real worker PodIP sync back to the tenant
+  automatically. From the user's perspective, the pod looks like it
+  runs on the tenant.
+- Submariner provides the actual network path. Liqo's built-in
+  WireGuard networking does not work on OpenShift (SCC/privilege
+  conflicts), so we disable it and use Submariner's Libreswan IPsec
+  tunnels instead. This is what makes interactive workloads possible:
+  Jupyter notebooks, KServe inference, and distributed training all
+  need pod-to-pod connectivity across clusters.
+- The namespace on the tenant is offloaded with Liqo's `LocalAndRemote`
+  strategy. Liqo creates a twin namespace on the worker with the same
+  name (`EnforceSameName` for single-tenant, `DefaultName` with a
+  cluster prefix for multi-tenant). Reflected resources and ShadowPods
+  land in the twin namespace.
 
 ### Lab Topology
 
@@ -1344,6 +1431,49 @@ minimum free disk threshold. A 1Gi PVC causes `CrashLoopBackOff` with
 `Storage reached its minimum free disk threshold`. Use >= 5Gi for MinIO
 PVCs.
 
+### RHOAI 2.x Istio sidecar injection breaks on worker
+
+RHOAI 2.x depends on OpenShift Service Mesh (OSSM), which injects
+Istio sidecar containers into pods via `sidecar.istio.io/inject: "true"`.
+When a pod with this annotation is offloaded to the worker (either via
+the custom VK or Liqo), the sidecar injection chain follows the pod:
+
+1. OSSM's mutating webhook on the tenant injects `istio-proxy` container
+   and adds `k8s.v1.cni.cncf.io/networks: v2-6-istio-cni` annotation
+2. The VK (or Liqo ShadowPod controller) copies the full pod spec to
+   the worker, including the injected sidecar and CNI annotation
+3. On the worker, there is no Istio CNI plugin and no OSSM control
+   plane. The `NetworkAttachmentDefinition` for `v2-6-istio-cni` does
+   not exist
+4. Both the `main` and `istio-proxy` containers get stuck at
+   `ContainerCreating` indefinitely
+
+Confirmed in RHOAI 2.x VK tests (10/10 pass, including this scenario).
+Test output from the Istio sidecar test:
+
+```
+Containers on worker: ['main', 'istio-proxy']
+Worker pod phase: Pending
+  istio-proxy: state=waiting: ContainerCreating
+  main:        state=waiting: ContainerCreating
+```
+
+This is not a bug in Liqo or the VK. The sidecar injection happens on
+the tenant before the pod is dispatched. The worker correctly rejects
+a CNI network attachment it does not have.
+
+**Why RHOAI 3.x avoids this entirely:** RHOAI 3.x removed the OSSM
+dependency (test L20 confirms no `servicemeshcontrolplanes.maistra.io`
+CRD exists on the tenant). No sidecar injection, no CNI annotation, no
+worker-side conflict. This is one reason the Liqo spike targets RHOAI
+3.x exclusively.
+
+**If RHOAI 2.x support is needed:** Disable sidecar injection for GPU
+workload namespaces by removing the `sidecar.istio.io/inject` label
+from the namespace or adding `sidecar.istio.io/inject: "false"` to
+individual pod specs. KServe serverless (Knative) still works without
+sidecar injection, it just loses mTLS between pods.
+
 ### Multi-tenant namespace isolation
 
 When multiple tenants peer with the same GPU worker, twin namespaces
@@ -1464,7 +1594,8 @@ the custom VK. ShadowPod controller preserves Kyverno-mutated labels
 **What this spike does not cover:**
 
 - Multi-tenant isolation with `DefaultName` namespace mapping
-- RHOAI 2.x compatibility
+- RHOAI 2.x compatibility (Istio sidecar injection is a known blocker;
+  see deployment finding above)
 - Liqo upgrades and PodIP sync behavior across versions
 - Submariner Globalnet for overlapping CIDRs
 - Performance under load (concurrent GPU workloads from multiple
@@ -1488,5 +1619,7 @@ Next priority is multi-tenant validation with `DefaultName` mapping.
    `gpuaas.redhat.com/managed=true` and a LocalQueue for Kueue.
    Automate this with a Kyverno generate policy or controller on the
    worker that watches for new namespaces with Liqo labels.
-3. **RHOAI 2.x** — Current results are RHOAI 3.x only. If RHOAI 2.x
-   support is needed, test against an RHOAI 2.x tenant cluster.
+3. **RHOAI 2.x** — Current results are RHOAI 3.x only. RHOAI 2.x has a
+   known Istio sidecar injection issue (see deployment finding). If 2.x
+   support is needed, test with sidecar injection disabled for GPU
+   workload namespaces.
