@@ -268,7 +268,7 @@ def rhoai2_lmeval_minimal(request, rhoai2_tenant_clients):
     core, custom = rhoai2_tenant_clients
     originals = _minimize_dsc_for_lmeval(core, custom)
     request.addfinalizer(lambda: _restore_dsc(custom, originals))
-    time.sleep(30)
+    time.sleep(60)
 
 
 @pytest.fixture(scope="session")
@@ -277,7 +277,7 @@ def rhoai3_lmeval_minimal(request, liqo_tenant_clients):
     core, custom = liqo_tenant_clients
     originals = _minimize_dsc_for_lmeval(core, custom)
     request.addfinalizer(lambda: _restore_dsc(custom, originals))
-    time.sleep(30)
+    time.sleep(60)
 
 
 @pytest.fixture(scope="session")

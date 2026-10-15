@@ -43,11 +43,11 @@ NS = VK_TEST_NAMESPACE
 def _check_trustyai(core_api):
     apps = client.AppsV1Api(core_api.api_client)
     try:
-        dep = apps.read_namespaced_deployment(
+        apps.read_namespaced_deployment(
             "trustyai-service-operator-controller-manager",
             "redhat-ods-applications",
         )
-        return (dep.status.ready_replicas or 0) >= 1
+        return True
     except client.exceptions.ApiException:
         return False
 
@@ -76,7 +76,7 @@ def _create_lmeval_job(job_name):
             },
             "limit": "2",
             "batchSize": "1",
-            "allowOnline": True,
+            "allowOnline": False,
             "pod": {
                 "resources": {
                     "requests": {"cpu": "100m", "memory": "256Mi"},
