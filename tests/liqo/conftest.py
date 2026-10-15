@@ -208,9 +208,19 @@ def _minimize_dsc_for_lmeval(core_api, custom_api):
     if not _wait_for_rhods_operator(core_api):
         log.warning("rhods-operator not ready after 300s, proceeding anyway")
 
-    dsc = custom_api.get_cluster_custom_object(
-        group=DSC_GROUP, version=DSC_VERSION, plural=DSC_PLURAL, name=DSC_NAME,
-    )
+    dsc = None
+    for attempt in range(6):
+        try:
+            dsc = custom_api.get_cluster_custom_object(
+                group=DSC_GROUP, version=DSC_VERSION, plural=DSC_PLURAL, name=DSC_NAME,
+            )
+            break
+        except Exception as exc:
+            if attempt < 5:
+                log.info("DSC GET failed (attempt %d), retrying in 10s: %s", attempt + 1, exc)
+                time.sleep(10)
+            else:
+                raise
     components = dsc.get("spec", {}).get("components", {})
     originals = {}
 
