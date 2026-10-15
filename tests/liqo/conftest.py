@@ -14,18 +14,17 @@ when using EnforceSameName mapping strategy.
 import logging
 import os
 import time
+import uuid
 
 import pytest
 import urllib3
 from kubernetes import client, config
 
-from helpers import VK_TEST_NAMESPACE, safe_delete
+from helpers import safe_delete
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 log = logging.getLogger(__name__)
-
-LIQO_TEST_NAMESPACE = VK_TEST_NAMESPACE
 
 DSC_GROUP = "datasciencecluster.opendatahub.io"
 DSC_VERSION = "v1"
@@ -108,14 +107,87 @@ def liqo_worker_clients():
 
 
 @pytest.fixture(scope="session")
-def liqo_test_namespace():
-    return LIQO_TEST_NAMESPACE
+def liqo_test_namespace(request, liqo_tenant_clients, liqo_worker_clients):
+    """Create a fresh namespace and trigger auto-offloading via GPU pod.
+
+    The Kyverno generate policy creates a NamespaceOffloading CR when
+    the warm-up GPU pod is admitted. Liqo processes the CR and creates
+    the twin namespace on the worker. After offloading is confirmed,
+    the warm-up pod is cleaned up and all tests run in this namespace.
+    """
+    tenant_core, _ = liqo_tenant_clients
+    worker_core, _ = liqo_worker_clients
+    ns = f"liqo-test-{uuid.uuid4().hex[:6]}"
+    log.info("Creating dynamic test namespace: %s", ns)
+
+    tenant_core.create_namespace(
+        body=client.V1Namespace(metadata=client.V1ObjectMeta(name=ns)),
+    )
+
+    warmup = "offload-warmup"
+    tenant_core.create_namespaced_pod(
+        namespace=ns,
+        body=client.V1Pod(
+            metadata=client.V1ObjectMeta(name=warmup, namespace=ns),
+            spec=client.V1PodSpec(
+                restart_policy="Never",
+                containers=[
+                    client.V1Container(
+                        name="gpu",
+                        image="nvcr.io/nvidia/cuda:12.8.0-base-ubi9",
+                        command=["nvidia-smi"],
+                        resources=client.V1ResourceRequirements(
+                            limits={"nvidia.com/gpu": "1"},
+                        ),
+                    ),
+                ],
+            ),
+        ),
+    )
+
+    deadline = time.time() + 120
+    while time.time() < deadline:
+        try:
+            worker_core.read_namespace(name=ns)
+            log.info("Twin namespace '%s' exists on worker", ns)
+            break
+        except client.exceptions.ApiException:
+            time.sleep(5)
+    else:
+        pytest.fail(f"Twin namespace '{ns}' not created on worker within 120s")
+
+    deadline = time.time() + 300
+    while time.time() < deadline:
+        try:
+            pod = tenant_core.read_namespaced_pod(name=warmup, namespace=ns)
+            if pod.status.phase in ("Succeeded", "Failed"):
+                break
+        except client.exceptions.ApiException:
+            pass
+        time.sleep(5)
+
+    try:
+        tenant_core.delete_namespaced_pod(
+            name=warmup, namespace=ns, grace_period_seconds=0,
+        )
+    except client.exceptions.ApiException:
+        pass
+
+    def _cleanup():
+        try:
+            tenant_core.delete_namespace(name=ns)
+            log.info("Deleted test namespace '%s'", ns)
+        except Exception as exc:
+            log.warning("Failed to delete namespace '%s': %s", ns, exc)
+
+    request.addfinalizer(_cleanup)
+    return ns
 
 
 @pytest.fixture(scope="session")
-def liqo_worker_namespace():
+def liqo_worker_namespace(liqo_test_namespace):
     """Twin namespace on worker — same name with EnforceSameName strategy."""
-    return LIQO_TEST_NAMESPACE
+    return liqo_test_namespace
 
 
 @pytest.fixture(scope="session")

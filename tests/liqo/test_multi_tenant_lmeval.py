@@ -28,15 +28,13 @@ import time
 import pytest
 from kubernetes import client
 
-from helpers import VK_TEST_NAMESPACE, force_delete_pod, wait_pod_exists
+from helpers import force_delete_pod, wait_pod_exists
 
 LMEVAL_GROUP = "trustyai.opendatahub.io"
 LMEVAL_VERSION = "v1alpha1"
 LMEVAL_PLURAL = "lmevaljobs"
 
 LMEVAL_MODEL_NAME = "hf"
-
-NS = VK_TEST_NAMESPACE
 
 
 def _check_trustyai(core_api):
@@ -60,11 +58,11 @@ def _check_lmeval_crd(core_api):
         return False
 
 
-def _create_lmeval_job(job_name):
+def _create_lmeval_job(job_name, namespace):
     return {
         "apiVersion": f"{LMEVAL_GROUP}/{LMEVAL_VERSION}",
         "kind": "LMEvalJob",
-        "metadata": {"name": job_name, "namespace": NS},
+        "metadata": {"name": job_name, "namespace": namespace},
         "spec": {
             "model": LMEVAL_MODEL_NAME,
             "modelArgs": [
@@ -103,28 +101,28 @@ def _create_lmeval_job(job_name):
     }
 
 
-def _run_lmeval_with_retry(core_api, custom_api, job_name, timeout=600):
+def _run_lmeval_with_retry(core_api, custom_api, job_name, ns, timeout=600):
     """Run LMEvalJob with TrustyAI race condition retry."""
-    job_body = _create_lmeval_job(job_name)
+    job_body = _create_lmeval_job(job_name, ns)
 
     for attempt in range(2):
         if attempt > 0:
             try:
                 custom_api.delete_namespaced_custom_object(
                     group=LMEVAL_GROUP, version=LMEVAL_VERSION,
-                    namespace=NS, plural=LMEVAL_PLURAL, name=job_name,
+                    namespace=ns, plural=LMEVAL_PLURAL, name=job_name,
                 )
                 time.sleep(15)
             except client.exceptions.ApiException:
                 pass
-            force_delete_pod(core_api, job_name, NS)
+            force_delete_pod(core_api, job_name, ns)
 
         custom_api.create_namespaced_custom_object(
             group=LMEVAL_GROUP, version=LMEVAL_VERSION,
-            namespace=NS, plural=LMEVAL_PLURAL, body=job_body,
+            namespace=ns, plural=LMEVAL_PLURAL, body=job_body,
         )
 
-        assert wait_pod_exists(core_api, job_name, NS, timeout=120), (
+        assert wait_pod_exists(core_api, job_name, ns, timeout=120), (
             f"LMEvalJob controller did not create pod {job_name} within 120s"
         )
 
@@ -136,7 +134,7 @@ def _run_lmeval_with_retry(core_api, custom_api, job_name, timeout=600):
             try:
                 job = custom_api.get_namespaced_custom_object(
                     group=LMEVAL_GROUP, version=LMEVAL_VERSION,
-                    namespace=NS, plural=LMEVAL_PLURAL, name=job_name,
+                    namespace=ns, plural=LMEVAL_PLURAL, name=job_name,
                 )
                 job_state = job.get("status", {}).get("state", "")
                 job_reason = job.get("status", {}).get("reason", "")
@@ -158,21 +156,29 @@ def _run_lmeval_with_retry(core_api, custom_api, job_name, timeout=600):
     return job_state, job_reason
 
 
-def _cleanup_lmeval(core_api, custom_api, job_name):
+def _safe_delete_ns(core_api, ns):
+    try:
+        core_api.delete_namespace(name=ns)
+    except client.exceptions.ApiException:
+        pass
+
+
+def _cleanup_lmeval(core_api, custom_api, job_name, ns):
     try:
         custom_api.delete_namespaced_custom_object(
             group=LMEVAL_GROUP, version=LMEVAL_VERSION,
-            namespace=NS, plural=LMEVAL_PLURAL, name=job_name,
+            namespace=ns, plural=LMEVAL_PLURAL, name=job_name,
         )
     except client.exceptions.ApiException:
         pass
-    force_delete_pod(core_api, job_name, NS)
+    force_delete_pod(core_api, job_name, ns)
 
 
 @pytest.mark.liqo
 @pytest.mark.rhoai
 def test_lmeval_decoupled_rhoai2_and_rhoai3(
     cleanup,
+    liqo_test_namespace,
     rhoai2_tenant_clients,
     rhoai2_vk_node_ready,
     rhoai2_lmeval_minimal,
@@ -192,9 +198,18 @@ def test_lmeval_decoupled_rhoai2_and_rhoai3(
     RHOAI 3.x dispatches via Liqo (virtual node + scheduler).
     Both peer with sno-worker.
     """
+    ns = liqo_test_namespace
     r2_core, r2_custom = rhoai2_tenant_clients
     r3_core, r3_custom = liqo_tenant_clients
     w_core, _ = liqo_worker_clients
+
+    try:
+        r2_core.create_namespace(
+            body=client.V1Namespace(metadata=client.V1ObjectMeta(name=ns)),
+        )
+    except client.exceptions.ApiException:
+        pass
+    cleanup(lambda: _safe_delete_ns(r2_core, ns))
 
     if not _check_trustyai(r2_core):
         pytest.skip("TrustyAI operator not ready on RHOAI 2.x tenant")
@@ -208,37 +223,39 @@ def test_lmeval_decoupled_rhoai2_and_rhoai3(
     r2_job = "rhoai2-lmeval"
     r3_job = "rhoai3-lmeval"
 
-    _cleanup_lmeval(r2_core, r2_custom, r2_job)
-    _cleanup_lmeval(r3_core, r3_custom, r3_job)
+    _cleanup_lmeval(r2_core, r2_custom, r2_job, ns)
+    _cleanup_lmeval(r3_core, r3_custom, r3_job, ns)
     time.sleep(5)
 
-    cleanup(lambda: _cleanup_lmeval(r2_core, r2_custom, r2_job))
-    cleanup(lambda: _cleanup_lmeval(r3_core, r3_custom, r3_job))
+    cleanup(lambda: _cleanup_lmeval(r2_core, r2_custom, r2_job, ns))
+    cleanup(lambda: _cleanup_lmeval(r3_core, r3_custom, r3_job, ns))
 
-    print("\n--- Submitting LMEvalJob on RHOAI 2.x ---")
-    r2_state, r2_reason = _run_lmeval_with_retry(r2_core, r2_custom, r2_job)
+    print(f"\n--- Using namespace '{ns}' ---")
+
+    print("--- Submitting LMEvalJob on RHOAI 2.x ---")
+    r2_state, r2_reason = _run_lmeval_with_retry(r2_core, r2_custom, r2_job, ns)
     print(f"  RHOAI 2.x: state={r2_state}, reason={r2_reason}")
 
     print("--- Submitting LMEvalJob on RHOAI 3.x ---")
-    r3_state, r3_reason = _run_lmeval_with_retry(r3_core, r3_custom, r3_job)
+    r3_state, r3_reason = _run_lmeval_with_retry(r3_core, r3_custom, r3_job, ns)
     print(f"  RHOAI 3.x: state={r3_state}, reason={r3_reason}")
 
     print("\n--- Decoupling check ---")
     try:
-        w_core.read_namespace(name=NS)
-        print(f"  Worker namespace '{NS}' exists (Liqo twin namespace)")
+        w_core.read_namespace(name=ns)
+        print(f"  Worker namespace '{ns}' exists (Liqo twin namespace)")
     except client.exceptions.ApiException:
-        print(f"  Worker namespace '{NS}' not found")
+        print(f"  Worker namespace '{ns}' not found")
 
     namespaces = w_core.list_namespace()
     vk_namespaces = [
         n.metadata.name for n in namespaces.items
-        if NS in n.metadata.name and n.metadata.name != NS
+        if ns in n.metadata.name and n.metadata.name != ns
     ]
     if vk_namespaces:
-        print(f"  VK worker namespaces containing '{NS}': {vk_namespaces}")
+        print(f"  VK worker namespaces containing '{ns}': {vk_namespaces}")
     else:
-        print(f"  No VK-prefixed worker namespaces found for '{NS}'")
+        print(f"  No VK-prefixed worker namespaces found for '{ns}'")
 
     print(f"\n--- Results ---")
     print(f"  RHOAI 2.x LMEvalJob: state={r2_state}, reason={r2_reason}")
