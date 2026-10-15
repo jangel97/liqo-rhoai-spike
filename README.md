@@ -369,6 +369,8 @@ python -m pytest tests/liqo/ -v -m kueue           # Kueue admission/scheduling
 
 ## Documentation
 
+- [Architecture](docs/architecture.md) with Mermaid dispatch diagram,
+  Submariner design decision, PVC model, and setup sequence
 - [Spike assessment](docs/liqo-spike-assessment.md) with all 32 test
   scenarios, deployment findings, and recommendation
 - [Submariner architecture](docs/submariner-architecture.md)
