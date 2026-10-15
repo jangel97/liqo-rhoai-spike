@@ -168,17 +168,43 @@ def _deploy_model_server(custom_api, runtime_name, isvc_name):
         )
 
 
-def _wait_isvc_ready(custom_api, isvc_name, timeout=600):
+def _wait_isvc_ready(custom_api, core_api, isvc_name, timeout=600):
     deadline = time.time() + timeout
+    last_printed = ""
     while time.time() < deadline:
-        obj = custom_api.get_namespaced_custom_object(
-            group=ISVC_GROUP, version=ISVC_VERSION,
-            namespace=NS, plural=ISVC_PLURAL, name=isvc_name,
-        )
-        for c in obj.get("status", {}).get("conditions", []):
-            if c.get("type") == "Ready" and c.get("status") == "True":
-                return True
-        time.sleep(10)
+        try:
+            obj = custom_api.get_namespaced_custom_object(
+                group=ISVC_GROUP, version=ISVC_VERSION,
+                namespace=NS, plural=ISVC_PLURAL, name=isvc_name,
+            )
+            conditions = obj.get("status", {}).get("conditions", [])
+            summary = "; ".join(
+                f"{c['type']}={c['status']}" for c in conditions
+            )
+            if summary != last_printed:
+                print(f"  {isvc_name} conditions: {summary or '(none yet)'}")
+                last_printed = summary
+            for c in conditions:
+                if c.get("type") == "Ready" and c.get("status") == "True":
+                    return True
+        except Exception as exc:
+            print(f"  {isvc_name} poll error: {exc}")
+
+        try:
+            pods = core_api.list_namespaced_pod(
+                namespace=NS,
+                label_selector=f"serving.kserve.io/inferenceservice={isvc_name}",
+            )
+            for p in pods.items:
+                phase = p.status.phase
+                ready = all(
+                    cs.ready for cs in (p.status.container_statuses or [])
+                )
+                print(f"  pod {p.metadata.name}: phase={phase}, ready={ready}")
+        except Exception:
+            pass
+
+        time.sleep(15)
     return False
 
 
@@ -364,13 +390,13 @@ def test_lmeval_decoupled_rhoai2_and_rhoai3(
     _deploy_model_server(r3_custom, r3_runtime, r3_isvc)
 
     print("--- Waiting for RHOAI 2.x ISVC Ready ---")
-    assert _wait_isvc_ready(r2_custom, r2_isvc), (
+    assert _wait_isvc_ready(r2_custom, r2_core, r2_isvc), (
         f"InferenceService {r2_isvc} not Ready on RHOAI 2.x within 600s"
     )
     print(f"  {r2_isvc}: Ready")
 
     print("--- Waiting for RHOAI 3.x ISVC Ready ---")
-    assert _wait_isvc_ready(r3_custom, r3_isvc), (
+    assert _wait_isvc_ready(r3_custom, r3_core, r3_isvc), (
         f"InferenceService {r3_isvc} not Ready on RHOAI 3.x within 600s"
     )
     print(f"  {r3_isvc}: Ready")
