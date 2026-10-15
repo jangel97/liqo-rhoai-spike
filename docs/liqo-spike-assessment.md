@@ -72,6 +72,7 @@ python -m pytest tests/liqo/ -v -m kueue           # Kueue admission/queuing/pre
 | `test_rhoai_smoke.py` | L18–L20 | RHOAI 3.x component presence, no CRDs on worker, no OSSM |
 | `test_rhoai_workloads.py` | L21–L30 | Notebook, workspace PVC, checkpoint, RayJob, TFJob, XGBoost, RayCluster, DSPA, LMEval |
 | `test_rhoai_networking.py` | L31–L33 | KServe/Notebook reachable via Submariner, tunnel recovery |
+| `test_multi_tenant_lmeval.py` | L34 | RHOAI 2.x + 3.x LMEval on same GPU worker, decoupling proof |
 | `conftest.py` | — | Shared fixtures (cluster clients, namespace, virtual node readiness, RHOAI DSC toggle) |
 | `helpers.py` | — | `force_delete_pod`, `wait_pod_exists` utilities |
 
@@ -392,6 +393,16 @@ python -m pytest tests/liqo/ -v -m kueue           # Kueue admission/queuing/pre
 | **Result** | PASS |
 | **Proves** | Submariner self-heals after gateway failure — tunnel recovery is automatic without user intervention |
 
+### L34: Multi-tenant decoupling (RHOAI 2.x + RHOAI 3.x LMEval)
+
+| | |
+|---|---|
+| **Test** | `test_multi_tenant_lmeval.py::test_lmeval_decoupled_rhoai2_and_rhoai3` |
+| **What** | RHOAI 2.x tenant (custom VK) and RHOAI 3.x tenant (Liqo) both submit LMEvalJob against the same GPU worker. Both use facebook/opt-125m via HuggingFace. Verifies both complete independently and the worker has separate namespaces for each dispatch path. |
+| **Result** | PASS |
+| **Notes** | RHOAI 2.x DSC defaults to `permitOnline: deny`, which blocks HF downloads even when the LMEvalJob spec has `allowOnline: true`. The fixture patches the DSC to `permitOnline: allow` and restores on teardown. Worker shows both VK-prefixed namespaces (`vk-*-vk-test`) and the Liqo twin namespace (`vk-test`). |
+| **Proves** | Two RHOAI tenants on different major versions can share the same GPU worker through different dispatch mechanisms (custom VK vs Liqo) without interference. |
+
 ---
 
 ## Comparison: Custom VK vs Liqo
@@ -408,7 +419,7 @@ python -m pytest tests/liqo/ -v -m kueue           # Kueue admission/queuing/pre
 | **Submariner** | S9 PASS | L13 PASS | |
 | **Notebook** | S10 PASS | L21 PASS | |
 | **Tunnel recovery** | S11 PASS | L32 PASS | |
-| **Multi-tenant** | S12 PASS | — | Not tested in Liqo spike |
+| **Multi-tenant** | S12 PASS | L34 PASS | RHOAI 2.x (VK) + RHOAI 3.x (Liqo) on same worker |
 | **Headless DNS** | S13 PASS | L14 PASS | |
 | **Logs/exec** | S14 PASS | L6 PASS | |
 | **OCP version decoupling** | S15 PASS | PASS | Tenant OCP 4.19, Worker OCP 4.22 — different versions |
@@ -478,8 +489,9 @@ tests/liqo/test_rhoai_workloads.py::test_dspa_on_liqo_cluster            PASSED
 tests/liqo/test_rhoai_workloads.py::test_lmeval_on_liqo_cluster          PASSED
 tests/liqo/test_storage.py::test_pvc_reflection                          PASSED
 tests/liqo/test_storage.py::test_pvc_persists_across_pod_restart         PASSED
+tests/liqo/test_multi_tenant_lmeval.py::test_lmeval_decoupled_rhoai2_and_rhoai3  PASSED
 
-Liqo v1.2.0 — 32 passed — 2026-10-15 (full suite, RHOAI 3.x)
+Liqo v1.2.0 — 33 passed — 2026-10-15 (full suite, RHOAI 2.x + 3.x multi-tenant)
 Liqo v1.2.0 — 17 passed — 2026-10-16 (core tests, Remote strategy)
 Liqo v1.2.0 — 17 passed — 2026-10-15 (core tests, LocalAndRemote strategy)
 Liqo v1.2.0 — 17 passed — 2026-10-15 (core tests, LocalAndRemote + GPU taint + Kyverno)
@@ -502,7 +514,7 @@ All 17 core tests pass under all three configurations on Liqo v1.2.0:
   KServe L10) receive the toleration via Kyverno and are NOT stripped
   by operator reconciliation.
 
-The full RHOAI 3.x suite (32 tests, all passing) validates end-to-end
+The full RHOAI 3.x suite (33 tests, all passing) validates end-to-end
 integration across all RHOAI workload types: Notebook CR (L21),
 Notebook with workspace PVC (L22), PyTorchJob with checkpoint PVC
 (L23), RayJob (L24), TFJob (L25), XGBoostJob (L26), RayCluster (L27),
@@ -1061,7 +1073,7 @@ for single-tenant validation). Multi-tenant validation with
 ### Conclusion
 
 Liqo v1.2.0 is a viable replacement for the custom Virtual Kubelet
-provider for RHOAI 3.x GPU workload offloading. 32 out of 32 tests
+provider for RHOAI 3.x GPU workload offloading. 33 out of 33 tests
 pass, covering every RHOAI workload type: Notebooks, PyTorchJob,
 TFJob, XGBoostJob, RayJob, RayCluster, KServe inference, DSPA
 pipelines, and LMEval model evaluation. No RHOAI operator required

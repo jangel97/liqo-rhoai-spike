@@ -3,7 +3,7 @@
 Proof of concept for offloading RHOAI 3.x GPU workloads from a tenant
 OpenShift cluster to a bare-metal GPU worker using Liqo v1.2.0.
 
-All 32 tests pass. The [spike assessment](docs/liqo-spike-assessment.md)
+All 33 tests pass. The [spike assessment](docs/liqo-spike-assessment.md)
 has the full scenario-by-scenario breakdown and recommendation.
 
 
@@ -324,7 +324,7 @@ dispatch layer.
 
 ## What's tested
 
-32 tests across 9 test files:
+33 tests across 10 test files:
 
 | File | Tests | What it covers |
 |------|-------|---------------|
@@ -337,6 +337,7 @@ dispatch layer.
 | `test_rhoai_smoke.py` | L18-L20 | RHOAI 3.x components present, no CRDs on worker, no OSSM |
 | `test_rhoai_workloads.py` | L21-L30 | Notebook, workspace PVC, checkpoint, RayJob, TFJob, XGBoost, RayCluster, DSPA, LMEval |
 | `test_rhoai_networking.py` | L31-L33 | KServe/Notebook via Submariner, tunnel recovery |
+| `test_multi_tenant_lmeval.py` | L34 | RHOAI 2.x + 3.x LMEval on same GPU worker, decoupling proof |
 
 
 ## How to run
@@ -371,7 +372,7 @@ python -m pytest tests/liqo/ -v -m kueue           # Kueue admission/scheduling
 
 - [Architecture](docs/architecture.md) with Mermaid dispatch diagram,
   Submariner design decision, PVC model, and setup sequence
-- [Spike assessment](docs/liqo-spike-assessment.md) with all 32 test
+- [Spike assessment](docs/liqo-spike-assessment.md) with all 33 test
   scenarios, deployment findings, and recommendation
 - [Submariner architecture](docs/submariner-architecture.md)
 
