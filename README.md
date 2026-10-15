@@ -3,7 +3,7 @@
 Proof of concept for offloading RHOAI 3.x GPU workloads from a tenant
 OpenShift cluster to a bare-metal GPU worker using Liqo v1.2.0.
 
-All 33 tests pass. The [spike assessment](docs/liqo-spike-assessment.md)
+All 34 tests pass. The [spike assessment](docs/liqo-spike-assessment.md)
 has the full scenario-by-scenario breakdown and recommendation.
 
 
@@ -112,6 +112,32 @@ RHOAI operators (training-operator, KServe, notebook-controller) do not
 strip these tolerations during reconciliation. The spike tests confirm
 operator-created pods keep the Kyverno-injected tolerations through
 the full create/reconcile cycle.
+
+
+## Automatic namespace offloading
+
+Liqo requires namespaces to be offloaded before it will dispatch pods to
+the worker. The Kyverno ClusterPolicy in
+`deploy/tenant-gpu-namespace-offloading-policy.yml` eliminates this
+manual step: when a pod with `nvidia.com/gpu` is created in any
+namespace, a `generate` rule creates a `NamespaceOffloading` CR
+automatically.
+
+```
+Customer creates namespace → creates GPU pod
+  → Kyverno generate: NamespaceOffloading CR
+  → Liqo offloads namespace, creates twin on worker
+  → Pod dispatched to worker GPU
+```
+
+Liqo retroactively picks up pods that landed on the virtual node before
+offloading finished, so the first GPU pod works without a recreate.
+The `NamespaceOffloading` CR persists after the pod is deleted
+(`synchronize: false`), so subsequent GPU pods in the same namespace
+offload instantly.
+
+Requires a ClusterRole with `rbac.kyverno.io/aggregate-to-background-controller`
+label (see `deploy/tenant-kyverno-offloading-rbac.yml`).
 
 
 ## Kueue integration
@@ -324,7 +350,7 @@ dispatch layer.
 
 ## What's tested
 
-33 tests across 10 test files:
+34 tests across 11 test files:
 
 | File | Tests | What it covers |
 |------|-------|---------------|
@@ -338,6 +364,7 @@ dispatch layer.
 | `test_rhoai_workloads.py` | L21-L30 | Notebook, workspace PVC, checkpoint, RayJob, TFJob, XGBoost, RayCluster, DSPA, LMEval |
 | `test_rhoai_networking.py` | L31-L33 | KServe/Notebook via Submariner, tunnel recovery |
 | `test_multi_tenant_lmeval.py` | L34 | RHOAI 2.x + 3.x LMEval on same GPU worker, decoupling proof |
+| `test_dynamic_offloading.py` | L35 | Kyverno auto-offloading: GPU pod in fresh namespace triggers offloading |
 
 
 ## How to run
@@ -372,7 +399,7 @@ python -m pytest tests/liqo/ -v -m kueue           # Kueue admission/scheduling
 
 - [Architecture](docs/architecture.md) with Mermaid dispatch diagram,
   Submariner design decision, PVC model, and setup sequence
-- [Spike assessment](docs/liqo-spike-assessment.md) with all 33 test
+- [Spike assessment](docs/liqo-spike-assessment.md) with all 34 test
   scenarios, deployment findings, and recommendation
 - [Submariner architecture](docs/submariner-architecture.md)
 

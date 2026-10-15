@@ -73,6 +73,7 @@ python -m pytest tests/liqo/ -v -m kueue           # Kueue admission/queuing/pre
 | `test_rhoai_workloads.py` | L21–L30 | Notebook, workspace PVC, checkpoint, RayJob, TFJob, XGBoost, RayCluster, DSPA, LMEval |
 | `test_rhoai_networking.py` | L31–L33 | KServe/Notebook reachable via Submariner, tunnel recovery |
 | `test_multi_tenant_lmeval.py` | L34 | RHOAI 2.x + 3.x LMEval on same GPU worker, decoupling proof |
+| `test_dynamic_offloading.py` | L35 | Kyverno auto-offloading: GPU pod in fresh namespace triggers offloading |
 | `conftest.py` | — | Shared fixtures (cluster clients, namespace, virtual node readiness, RHOAI DSC toggle) |
 | `helpers.py` | — | `force_delete_pod`, `wait_pod_exists` utilities |
 
@@ -403,6 +404,16 @@ python -m pytest tests/liqo/ -v -m kueue           # Kueue admission/queuing/pre
 | **Notes** | RHOAI 2.x DSC defaults to `permitOnline: deny`, which blocks HF downloads even when the LMEvalJob spec has `allowOnline: true`. The fixture patches the DSC to `permitOnline: allow` and restores on teardown. Worker shows both VK-prefixed namespaces (`vk-*-vk-test`) and the Liqo twin namespace (`vk-test`). |
 | **Proves** | Two RHOAI tenants on different major versions can share the same GPU worker through different dispatch mechanisms (custom VK vs Liqo) without interference. |
 
+### L35: Dynamic namespace offloading via Kyverno
+
+| | |
+|---|---|
+| **Test** | `test_dynamic_offloading.py::test_dynamic_namespace_offloading` |
+| **What** | Create a fresh namespace with no offloading configured. Create a GPU pod. Kyverno's generate rule auto-creates the `NamespaceOffloading` CR. Liqo creates the twin namespace on the worker. Pod runs on worker GPU and succeeds. |
+| **Result** | PASS |
+| **Notes** | Completed in 5.5s. Liqo retroactively picks up pods that landed on the virtual node before offloading was fully processed, so no pod recreate is needed. The Kyverno `generate` rule requires a ClusterRole with the `rbac.kyverno.io/aggregate-to-background-controller` aggregation label granting create/get on `namespaceoffloadings`. |
+| **Proves** | Customers can create any namespace and submit GPU workloads without an admin running `liqoctl offload namespace` first. The full dispatch path (namespace offloading, scheduling, ShadowPod creation, execution) is fully automatic. |
+
 ---
 
 ## Comparison: Custom VK vs Liqo
@@ -491,7 +502,7 @@ tests/liqo/test_storage.py::test_pvc_reflection                          PASSED
 tests/liqo/test_storage.py::test_pvc_persists_across_pod_restart         PASSED
 tests/liqo/test_multi_tenant_lmeval.py::test_lmeval_decoupled_rhoai2_and_rhoai3  PASSED
 
-Liqo v1.2.0 — 33 passed — 2026-10-15 (full suite, RHOAI 2.x + 3.x multi-tenant)
+Liqo v1.2.0 — 34 passed — 2026-10-16 (full suite + dynamic offloading + multi-tenant)
 Liqo v1.2.0 — 17 passed — 2026-10-16 (core tests, Remote strategy)
 Liqo v1.2.0 — 17 passed — 2026-10-15 (core tests, LocalAndRemote strategy)
 Liqo v1.2.0 — 17 passed — 2026-10-15 (core tests, LocalAndRemote + GPU taint + Kyverno)
@@ -514,7 +525,7 @@ All 17 core tests pass under all three configurations on Liqo v1.2.0:
   KServe L10) receive the toleration via Kyverno and are NOT stripped
   by operator reconciliation.
 
-The full RHOAI 3.x suite (33 tests, all passing) validates end-to-end
+The full RHOAI 3.x suite (34 tests, all passing) validates end-to-end
 integration across all RHOAI workload types: Notebook CR (L21),
 Notebook with workspace PVC (L22), PyTorchJob with checkpoint PVC
 (L23), RayJob (L24), TFJob (L25), XGBoostJob (L26), RayCluster (L27),
@@ -1073,7 +1084,7 @@ for single-tenant validation). Multi-tenant validation with
 ### Conclusion
 
 Liqo v1.2.0 is a viable replacement for the custom Virtual Kubelet
-provider for RHOAI 3.x GPU workload offloading. 33 out of 33 tests
+provider for RHOAI 3.x GPU workload offloading. 34 out of 34 tests
 pass, covering every RHOAI workload type: Notebooks, PyTorchJob,
 TFJob, XGBoostJob, RayJob, RayCluster, KServe inference, DSPA
 pipelines, and LMEval model evaluation. No RHOAI operator required
