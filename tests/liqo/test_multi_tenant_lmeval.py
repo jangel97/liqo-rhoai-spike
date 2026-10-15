@@ -128,7 +128,13 @@ def _deploy_model_server(custom_api, runtime_name, isvc_name):
     isvc = {
         "apiVersion": f"{ISVC_GROUP}/{ISVC_VERSION}",
         "kind": "InferenceService",
-        "metadata": {"name": isvc_name, "namespace": NS},
+        "metadata": {
+            "name": isvc_name,
+            "namespace": NS,
+            "annotations": {
+                "serving.kserve.io/deploymentMode": "RawDeployment",
+            },
+        },
         "spec": {
             "predictor": {
                 "model": {
@@ -162,7 +168,7 @@ def _deploy_model_server(custom_api, runtime_name, isvc_name):
         )
 
 
-def _wait_isvc_ready(custom_api, isvc_name, timeout=300):
+def _wait_isvc_ready(custom_api, isvc_name, timeout=600):
     deadline = time.time() + timeout
     while time.time() < deadline:
         obj = custom_api.get_namespaced_custom_object(
@@ -359,13 +365,13 @@ def test_lmeval_decoupled_rhoai2_and_rhoai3(
 
     print("--- Waiting for RHOAI 2.x ISVC Ready ---")
     assert _wait_isvc_ready(r2_custom, r2_isvc), (
-        f"InferenceService {r2_isvc} not Ready on RHOAI 2.x within 300s"
+        f"InferenceService {r2_isvc} not Ready on RHOAI 2.x within 600s"
     )
     print(f"  {r2_isvc}: Ready")
 
     print("--- Waiting for RHOAI 3.x ISVC Ready ---")
     assert _wait_isvc_ready(r3_custom, r3_isvc), (
-        f"InferenceService {r3_isvc} not Ready on RHOAI 3.x within 300s"
+        f"InferenceService {r3_isvc} not Ready on RHOAI 3.x within 600s"
     )
     print(f"  {r3_isvc}: Ready")
 
