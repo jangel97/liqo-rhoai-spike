@@ -146,6 +146,120 @@ def liqo_virtual_node_ready(liqo_tenant_clients, liqo_virtual_node):
 
 
 @pytest.fixture(scope="session")
+def rhoai2_tenant_clients():
+    path = os.environ.get(
+        "TENANT_KUBECONFIG", os.path.expanduser("~/.kube/tenant"),
+    )
+    return _load_clients(path)
+
+
+LMEVAL_REQUIRED_COMPONENTS = {"kserve", "trustyai"}
+LMEVAL_DISABLED_COMPONENTS = [
+    "dashboard", "workbenches", "ray", "training",
+    "datasciencepipelines", "modelmeshserving", "codeflare",
+    "modelregistry", "kueue",
+]
+
+
+def _minimize_dsc_for_lmeval(custom_api):
+    """Disable all DSC components except kserve and trustyai.
+
+    Returns a dict of {component: original_state} for teardown.
+    """
+    dsc = custom_api.get_cluster_custom_object(
+        group=DSC_GROUP, version=DSC_VERSION, plural=DSC_PLURAL, name=DSC_NAME,
+    )
+    components = dsc.get("spec", {}).get("components", {})
+    originals = {}
+
+    for comp in LMEVAL_DISABLED_COMPONENTS:
+        state = components.get(comp, {}).get("managementState", "Removed")
+        originals[comp] = state
+        if state == "Managed":
+            try:
+                custom_api.patch_cluster_custom_object(
+                    group=DSC_GROUP, version=DSC_VERSION,
+                    plural=DSC_PLURAL, name=DSC_NAME,
+                    body={"spec": {"components": {comp: {"managementState": "Removed"}}}},
+                )
+                log.info("DSC %s → Removed (was %s)", comp, state)
+            except Exception as exc:
+                log.warning("Failed to disable DSC %s: %s", comp, exc)
+
+    for comp in LMEVAL_REQUIRED_COMPONENTS:
+        state = components.get(comp, {}).get("managementState", "Removed")
+        originals[comp] = state
+        if state != "Managed":
+            try:
+                custom_api.patch_cluster_custom_object(
+                    group=DSC_GROUP, version=DSC_VERSION,
+                    plural=DSC_PLURAL, name=DSC_NAME,
+                    body={"spec": {"components": {comp: {"managementState": "Managed"}}}},
+                )
+                log.info("DSC %s → Managed (was %s)", comp, state)
+            except Exception as exc:
+                log.warning("Failed to enable DSC %s: %s", comp, exc)
+
+    return originals
+
+
+def _restore_dsc(custom_api, originals):
+    for comp, state in originals.items():
+        current_dsc = custom_api.get_cluster_custom_object(
+            group=DSC_GROUP, version=DSC_VERSION, plural=DSC_PLURAL, name=DSC_NAME,
+        )
+        current = (
+            current_dsc.get("spec", {}).get("components", {})
+            .get(comp, {}).get("managementState", "Removed")
+        )
+        if current != state:
+            try:
+                custom_api.patch_cluster_custom_object(
+                    group=DSC_GROUP, version=DSC_VERSION,
+                    plural=DSC_PLURAL, name=DSC_NAME,
+                    body={"spec": {"components": {comp: {"managementState": state}}}},
+                )
+                log.info("DSC %s → %s (restored)", comp, state)
+            except Exception as exc:
+                log.warning("Failed to restore DSC %s: %s", comp, exc)
+
+
+@pytest.fixture(scope="session")
+def rhoai2_lmeval_minimal(request, rhoai2_tenant_clients):
+    """Strip RHOAI 2.x DSC to kserve + trustyai only."""
+    _, custom = rhoai2_tenant_clients
+    originals = _minimize_dsc_for_lmeval(custom)
+    request.addfinalizer(lambda: _restore_dsc(custom, originals))
+    time.sleep(30)
+
+
+@pytest.fixture(scope="session")
+def rhoai3_lmeval_minimal(request, liqo_tenant_clients):
+    """Strip RHOAI 3.x DSC to kserve + trustyai only."""
+    _, custom = liqo_tenant_clients
+    originals = _minimize_dsc_for_lmeval(custom)
+    request.addfinalizer(lambda: _restore_dsc(custom, originals))
+    time.sleep(30)
+
+
+@pytest.fixture(scope="session")
+def rhoai2_vk_node_ready(rhoai2_tenant_clients):
+    """Wait for the custom VK node gpu-worker on the RHOAI 2.x tenant."""
+    tenant_core, _ = rhoai2_tenant_clients
+    deadline = time.time() + 120
+    while time.time() < deadline:
+        try:
+            node = tenant_core.read_node(name="gpu-worker")
+            for cond in (node.status.conditions or []):
+                if cond.type == "Ready" and cond.status == "True":
+                    return True
+        except client.exceptions.ApiException:
+            pass
+        time.sleep(10)
+    pytest.fail("VK node gpu-worker not Ready on RHOAI 2.x tenant within 120s")
+
+
+@pytest.fixture(scope="session")
 def rhoai_full_environment(request, liqo_tenant_clients):
     """Enable RHOAI DSC components for full e2e coverage.
 
