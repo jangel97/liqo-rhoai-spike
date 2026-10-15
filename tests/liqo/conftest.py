@@ -262,13 +262,33 @@ def _restore_dsc(custom_api, originals):
                 log.warning("Failed to restore DSC %s: %s", comp, exc)
 
 
+def _wait_trustyai_ready(core_api, timeout=180):
+    """Wait for TrustyAI controller deployment to exist and have ready pods."""
+    apps = client.AppsV1Api(core_api.api_client)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            dep = apps.read_namespaced_deployment(
+                "trustyai-service-operator-controller-manager",
+                RHOAI_APPS_NS,
+            )
+            if (dep.status.ready_replicas or 0) >= 1:
+                log.info("TrustyAI controller ready")
+                return True
+        except client.exceptions.ApiException:
+            pass
+        time.sleep(10)
+    log.warning("TrustyAI controller not ready after %ds", timeout)
+    return False
+
+
 @pytest.fixture(scope="session")
 def rhoai2_lmeval_minimal(request, rhoai2_tenant_clients):
     """Strip RHOAI 2.x DSC to kserve + trustyai only."""
     core, custom = rhoai2_tenant_clients
     originals = _minimize_dsc_for_lmeval(core, custom)
     request.addfinalizer(lambda: _restore_dsc(custom, originals))
-    time.sleep(60)
+    _wait_trustyai_ready(core)
 
 
 @pytest.fixture(scope="session")
@@ -277,7 +297,7 @@ def rhoai3_lmeval_minimal(request, liqo_tenant_clients):
     core, custom = liqo_tenant_clients
     originals = _minimize_dsc_for_lmeval(core, custom)
     request.addfinalizer(lambda: _restore_dsc(custom, originals))
-    time.sleep(60)
+    _wait_trustyai_ready(core)
 
 
 @pytest.fixture(scope="session")
