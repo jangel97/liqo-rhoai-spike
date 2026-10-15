@@ -238,10 +238,47 @@ def _minimize_dsc_for_lmeval(core_api, custom_api):
             if _patch_dsc_with_retry(custom_api, comp, "Managed"):
                 log.info("DSC %s → Managed (was %s)", comp, state)
 
+    permit_online = (
+        components.get("trustyai", {}).get("eval", {})
+        .get("lmeval", {}).get("permitOnline", "deny")
+    )
+    originals["_trustyai_permitOnline"] = permit_online
+    if permit_online != "allow":
+        body = {"spec": {"components": {"trustyai": {
+            "eval": {"lmeval": {"permitOnline": "allow"}},
+        }}}}
+        for attempt in range(6):
+            try:
+                custom_api.patch_cluster_custom_object(
+                    group=DSC_GROUP, version=DSC_VERSION,
+                    plural=DSC_PLURAL, name=DSC_NAME, body=body,
+                )
+                log.info("DSC trustyai.eval.lmeval.permitOnline → allow (was %s)", permit_online)
+                break
+            except Exception as exc:
+                if attempt < 5:
+                    time.sleep(10)
+                else:
+                    log.warning("Failed to set permitOnline: %s", exc)
+
     return originals
 
 
 def _restore_dsc(custom_api, originals):
+    permit_online = originals.pop("_trustyai_permitOnline", None)
+    if permit_online is not None:
+        try:
+            custom_api.patch_cluster_custom_object(
+                group=DSC_GROUP, version=DSC_VERSION,
+                plural=DSC_PLURAL, name=DSC_NAME,
+                body={"spec": {"components": {"trustyai": {
+                    "eval": {"lmeval": {"permitOnline": permit_online}},
+                }}}},
+            )
+            log.info("DSC trustyai.eval.lmeval.permitOnline → %s (restored)", permit_online)
+        except Exception as exc:
+            log.warning("Failed to restore permitOnline: %s", exc)
+
     for comp, state in originals.items():
         current_dsc = custom_api.get_cluster_custom_object(
             group=DSC_GROUP, version=DSC_VERSION, plural=DSC_PLURAL, name=DSC_NAME,
